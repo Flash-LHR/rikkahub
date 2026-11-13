@@ -2,6 +2,7 @@ package me.rerere.rikkahub.phoneuse
 
 import android.content.Context
 import android.os.Build
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -96,12 +97,42 @@ class PhoneUseManager {
     /** 正在截图或执行手势，这期间悬浮窗要让出屏幕：不能出现在截图里，也不能挡住点击 */
     val acting: StateFlow<Boolean> = _acting.asStateFlow()
 
-    fun attach(controller: PhoneController) {
-        _controller.value = controller
+    private val screenOnTurns = mutableSetOf<PhoneUseTurn>()
+    private val _keepScreenOn = MutableStateFlow(false)
+
+    /** 和 acting 不同，涵盖使用过 Phone Use 的整轮生成；无障碍服务断开时不再持有屏幕。 */
+    val keepScreenOn: StateFlow<Boolean> = _keepScreenOn.asStateFlow()
+
+    internal suspend fun keepScreenOnForTurn() {
+        currentCoroutineContext()[PhoneUseTurn]?.keepScreenOn(this)
     }
 
+    @Synchronized
+    internal fun acquireScreenOn(turn: PhoneUseTurn) {
+        screenOnTurns.add(turn)
+        updateScreenOn()
+    }
+
+    @Synchronized
+    internal fun releaseScreenOn(turn: PhoneUseTurn) {
+        screenOnTurns.remove(turn)
+        updateScreenOn()
+    }
+
+    private fun updateScreenOn() {
+        _keepScreenOn.value = _controller.value != null && screenOnTurns.isNotEmpty()
+    }
+
+    @Synchronized
+    fun attach(controller: PhoneController) {
+        _controller.value = controller
+        updateScreenOn()
+    }
+
+    @Synchronized
     fun detach(controller: PhoneController) {
         _controller.compareAndSet(controller, null)
+        updateScreenOn()
     }
 
     fun setActing(acting: Boolean) {
