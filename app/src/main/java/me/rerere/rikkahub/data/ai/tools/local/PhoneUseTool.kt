@@ -176,6 +176,7 @@ private class PhoneUseSession(
         val controller = manager.controller.value ?: error(
             "Phone Use is not enabled. Ask the user to turn on \"RikkaHub Phone Use\" in the system accessibility settings."
         )
+        manager.keepScreenOnForTurn()
         when (val action = params.string("action") ?: error("action is required")) {
             "list_apps" -> text(
                 controller.listApps()
