@@ -1,6 +1,16 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -14,6 +24,7 @@ import me.rerere.rikkahub.phoneuse.PhoneElement
 import me.rerere.rikkahub.phoneuse.PhoneKey
 import me.rerere.rikkahub.phoneuse.PhoneScreen
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
+import me.rerere.rikkahub.phoneuse.PhoneUseTurn
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -238,6 +249,123 @@ class PhoneUseToolTest {
         assertEquals("tap", phoneUseActionOf("""{"action":"tap","element":3}"""))
         assertNull(phoneUseActionOf("""{"action":"ta"""))
         assertNull(phoneUseActionOf(""))
+    }
+
+    @Test
+    fun `screen stays on between phone actions and across agent flow completion until the turn ends`() = runTest {
+        manager.attach(controller)
+        val turn = PhoneUseTurn()
+        assertFalse(manager.keepScreenOn.value)
+        try {
+            flow {
+                call {
+                    put("action", "press")
+                    put("key", "home")
+                }
+                emit(Unit)
+            }.flowOn(StandardTestDispatcher(testScheduler) + turn).first()
+
+            assertFalse(manager.acting.value)
+            assertTrue(manager.keepScreenOn.value)
+            // 模型等待超过常见的息屏时间，以及中途压缩后重开 agent flow，都仍属于同一轮。
+            delay(60_000)
+            assertTrue(manager.keepScreenOn.value)
+            withContext(turn) { call { put("action", "observe") } }
+        } finally {
+            turn.close()
+        }
+        assertFalse(manager.keepScreenOn.value)
+    }
+
+    @Test
+    fun `ordinary generation without phone use does not keep the screen on`() = runTest {
+        manager.attach(controller)
+        val turn = PhoneUseTurn()
+        withContext(turn) { delay(60_000) }
+        assertFalse(manager.keepScreenOn.value)
+        turn.close()
+    }
+
+    @Test
+    fun `cancelling the turn releases the screen after a phone action`() = runTest {
+        manager.attach(controller)
+        val job = launch {
+            val turn = PhoneUseTurn()
+            try {
+                withContext(turn) {
+                    call { put("action", "observe") }
+                    awaitCancellation()
+                }
+            } finally {
+                turn.close()
+            }
+        }
+        runCurrent()
+        assertTrue(manager.keepScreenOn.value)
+        job.cancelAndJoin()
+        assertFalse(manager.keepScreenOn.value)
+    }
+
+    @Test
+    fun `a failing phone turn releases the screen`() = runTest {
+        manager.attach(controller)
+        val turn = PhoneUseTurn()
+        val failure = runCatching {
+            try {
+                withContext(turn) {
+                    call { put("action", "observe") }
+                    error("Provider failed after a phone action")
+                }
+            } finally {
+                turn.close()
+            }
+        }.exceptionOrNull()
+        assertEquals("Provider failed after a phone action", failure?.message)
+        assertFalse(manager.keepScreenOn.value)
+    }
+
+    @Test
+    fun `ending one of two phone turns does not release the other turns screen`() = runTest {
+        manager.attach(controller)
+        val first = PhoneUseTurn()
+        val second = PhoneUseTurn()
+        withContext(first) {
+            call { put("action", "observe") }
+            call { put("action", "observe") }
+        }
+        withContext(second) { call { put("action", "observe") } }
+        first.close()
+        first.close()
+        assertTrue(manager.keepScreenOn.value)
+        second.close()
+        assertFalse(manager.keepScreenOn.value)
+        // 已结束的 scope 不能被迟到的工具调用重新持有。
+        withContext(first) { call { put("action", "observe") } }
+        assertFalse(manager.keepScreenOn.value)
+    }
+
+    @Test
+    fun `service disconnect releases the screen and reconnect restores an active turn`() = runTest {
+        manager.attach(controller)
+        val turn = PhoneUseTurn()
+        withContext(turn) { call { put("action", "observe") } }
+        manager.detach(controller)
+        assertFalse(manager.keepScreenOn.value)
+        manager.attach(controller)
+        assertTrue(manager.keepScreenOn.value)
+        turn.close()
+        assertFalse(manager.keepScreenOn.value)
+    }
+
+    @Test
+    fun `unavailable phone use cannot acquire the screen`() = runTest {
+        val turn = PhoneUseTurn()
+        withContext(turn) {
+            assertTrue(runCatching { call { put("action", "observe") } }.isFailure)
+        }
+        manager.attach(controller)
+        assertFalse(manager.keepScreenOn.value)
+        turn.close()
     }
 
     private class FakeController(private val manager: PhoneUseManager) : PhoneController {
