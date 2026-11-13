@@ -17,8 +17,13 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.annotation.RequiresApi
 import androidx.core.graphics.scale
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
@@ -42,6 +47,9 @@ private const val JPEG_QUALITY = 80
 class PhoneUseAccessibilityService : AccessibilityService(), PhoneController {
     private val manager: PhoneUseManager by inject()
     private val indicator by lazy { GestureIndicator(this) }
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val screenOnWindow by lazy { PhoneUseScreenOnWindow(this) }
+    private var screenOnJob: Job? = null
 
     // 和最近一次 captureScreen 返回的元素一一对应，setText 靠它找到节点
     @Volatile
@@ -50,15 +58,23 @@ class PhoneUseAccessibilityService : AccessibilityService(), PhoneController {
     override fun onServiceConnected() {
         Log.i(TAG, "onServiceConnected")
         manager.attach(this)
+        screenOnJob?.cancel()
+        screenOnJob = serviceScope.launch {
+            manager.keepScreenOn.collect(screenOnWindow::setEnabled)
+        }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
         manager.detach(this)
+        screenOnJob?.cancel()
+        screenOnWindow.setEnabled(false)
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         manager.detach(this)
+        serviceScope.cancel()
+        screenOnWindow.setEnabled(false)
         indicator.dismiss()
         super.onDestroy()
     }
