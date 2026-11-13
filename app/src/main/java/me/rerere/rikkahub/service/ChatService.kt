@@ -81,6 +81,7 @@ import me.rerere.rikkahub.data.model.withoutConversationFields
 import me.rerere.rikkahub.data.model.withoutUnresumableToolCalls
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.FolderRepository
+import me.rerere.rikkahub.phoneuse.PhoneUseTurn
 import me.rerere.rikkahub.web.BadRequestException
 import me.rerere.rikkahub.web.NotFoundException
 import java.net.ConnectException
@@ -727,6 +728,7 @@ class ChatService(
             // 上一段是压缩后新开的；摘要加系统提示词本身就超过阈值时再压也没用，这一轮不再压缩
             var afterCompression = false
             var compressionUseless = false
+            val phoneUseTurn = PhoneUseTurn()
             try {
                 while (true) {
                     val replyNodeId = target.nodeId
@@ -749,7 +751,7 @@ class ChatService(
                         },
                     )
                     finishReason = null
-                    runAgent(request, hooks).flowOn(Dispatchers.IO).collect { event ->
+                    runAgent(request, hooks).flowOn(Dispatchers.IO + phoneUseTurn).collect { event ->
                         when (event) {
                             is AgentEvent.MessageUpdated -> {
                                 // 生成过程中只有网络重试的提示会留着，收到新内容说明重试已经成功
@@ -782,6 +784,7 @@ class ChatService(
                     session.replyMessageId.value = target.continuedMessageId
                 }
             } finally {
+                phoneUseTurn.close()
                 withContext(NonCancellable) {
                     session.processingStatus.value = null
                     // 可能被取消了，或者意外结束，兜底保存
